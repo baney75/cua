@@ -81,6 +81,9 @@ impl Tool for DoubleClickTool {
         // double-click (the explicit last resort for surfaces that drop
         // background CGEvents), via the same skylight assist click uses.
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
+        if let Some(refusal) = super::workspace_guard::check("double_click", &args, delivery_mode.is_foreground()) {
+            return refusal;
+        }
         let cursor_key = super::cursor_tools::resolve_cursor_key(&args);
         let window_id_arg = args.opt_u64("window_id");
         let resolved = match self.state.snapshots.resolve(pid, &args) {

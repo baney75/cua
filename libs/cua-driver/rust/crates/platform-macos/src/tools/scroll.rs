@@ -177,6 +177,9 @@ impl Tool for ScrollTool {
         // background CGEvents). Only the pixel-wheel path honors it; the
         // keystroke path is background-by-design and untouched.
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
+        if let Some(refusal) = super::workspace_guard::check("scroll", &args, delivery_mode.is_foreground()) {
+            return refusal;
+        }
         // Electron/Chromium drop background wheel events and keystrokes; a
         // background scroll there goes through accessibility instead (below).
         let electron_background =

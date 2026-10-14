@@ -268,6 +268,9 @@ impl Tool for HotkeyTool {
         // explicit NSMenu-activation rung for menu shortcuts that ignore a
         // background combo (matches click/type_text).
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
+        if let Some(refusal) = super::workspace_guard::check("hotkey", &args, delivery_mode.is_foreground()) {
+            return refusal;
+        }
         let fg = delivery_mode.is_foreground();
         let px = args.get("x").and_then(|value| value.as_f64());
         let py = args.get("y").and_then(|value| value.as_f64());

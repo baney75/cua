@@ -287,6 +287,9 @@ impl Tool for PressKeyTool {
         // window (auth-envelope post, even with window_id); foreground is the
         // explicit NSMenu-activation rung. Matches click/type_text/hotkey.
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
+        if let Some(refusal) = super::workspace_guard::check("press_key", &args, delivery_mode.is_foreground()) {
+            return refusal;
+        }
         let fg = delivery_mode.is_foreground();
 
         // Argument-shape errors are reported before any gating or retained

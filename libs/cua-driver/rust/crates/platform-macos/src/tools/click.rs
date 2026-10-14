@@ -495,6 +495,9 @@ impl Tool for ClickTool {
         // delivery_mode: per-call ladder rung. Foreground briefly activates the
         // target for both AX and pixel paths, then restores the prior app.
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
+        if let Some(refusal) = super::workspace_guard::check("click", &args, delivery_mode.is_foreground()) {
+            return refusal;
+        }
         // Reject unknown buttons explicitly so silent left-click fall-through can't
         // mask a typo. Keep "" → default left for old clients that never sent the field.
         if !matches!(button_str.as_str(), "" | "left" | "right" | "middle") {

@@ -91,6 +91,9 @@ impl Tool for RightClickTool {
         // background CGEvents), via the same skylight assist click uses. The AX
         // (AXShowMenu) path is background-by-design and untouched.
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
+        if let Some(refusal) = super::workspace_guard::check("right_click", &args, delivery_mode.is_foreground()) {
+            return refusal;
+        }
         let cursor_key = super::cursor_tools::resolve_cursor_key(&args);
 
         let window_id_arg = args.opt_u64("window_id");

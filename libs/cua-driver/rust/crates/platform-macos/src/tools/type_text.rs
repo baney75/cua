@@ -190,6 +190,9 @@ impl Tool for TypeTextTool {
         };
         let delay_ms = args.u64_or("delay_ms", 30);
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
+        if let Some(refusal) = super::workspace_guard::check("type_text", &args, delivery_mode.is_foreground()) {
+            return refusal;
+        }
         if let Some(error) = screen_sharing_delivery_error(
             crate::input::keyboard::is_screen_sharing_pid(pid),
             delivery_mode.is_foreground(),

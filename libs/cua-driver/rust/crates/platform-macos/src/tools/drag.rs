@@ -230,6 +230,9 @@ impl Tool for DragTool {
         // that drop background CGEvents), via the same skylight assist click
         // uses. Requires a window_id to have a window to front.
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
+        if let Some(refusal) = super::workspace_guard::check("drag", &args, delivery_mode.is_foreground()) {
+            return refusal;
+        }
         if !delivery_mode.is_foreground() {
             return background_drag_refusal();
         }
