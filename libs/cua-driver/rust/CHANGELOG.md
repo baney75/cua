@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.35.4](https://github.com/trycua/cua/compare/cua-driver-rs-v0.35.4...cua-driver-rs-v0.35.4) (2026-10-14)
+
+
+### Bug Fixes
+
+* **cua-driver:** advertise coordinate scrolling support ([#5149](https://github.com/trycua/cua/issues/5149)) ([f53daa6](https://github.com/trycua/cua/commit/f53daa6c2a6f1c04ccbcf57adabccd0d7d43bba8))
+* **cua-driver:** drain autoreleased objects on SCK capture workers ([#5170](https://github.com/trycua/cua/issues/5170)) ([b6a8280](https://github.com/trycua/cua/commit/b6a8280d6ff719a94f22cac06bc6951a1bdb4b74))
+* **cua-driver:** let CUA_LOG=info and debug raise the log level ([3f70341](https://github.com/trycua/cua/commit/3f70341ee1e42c5b32e22c1ce1483ceeba0a5831))
+* **cua-driver:** stop worker and embedded processes launching Orca on GNOME ([#5179](https://github.com/trycua/cua/issues/5179)) ([c2a42ea](https://github.com/trycua/cua/commit/c2a42eaaf723ed5aee6d9ee2e0fb0808c896c882))
+* **cua-driver:** type long Linux text in spare-keycode batches ([#5168](https://github.com/trycua/cua/issues/5168)) ([8be7052](https://github.com/trycua/cua/commit/8be7052a063aacb58c4d743b4e7efa3afd78143a))
+
 ## [0.35.4](https://github.com/trycua/cua/compare/cua-driver-rs-v0.35.3...cua-driver-rs-v0.35.4) (2026-10-14)
 
 
