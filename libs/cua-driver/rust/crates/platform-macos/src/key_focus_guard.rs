@@ -205,16 +205,30 @@ extern "C" {
 
 /// Whether the user pressed a mouse button or a modifier key on the real
 /// hardware just now. Events the driver posts to a pid do not count.
-fn user_switched_recently() -> bool {
+///
+/// Every path that puts the prior frontmost app back checks this first: the
+/// self-activation revert here, the focus-steal leases
+/// ([`crate::focus_steal`]) and the browser tools' restore. Without it, a
+/// user who clicks or Cmd-Tabs to another app while an agent's action is in
+/// flight is sent back to the app they were leaving.
+pub(crate) fn user_switched_recently() -> bool {
     const HID_SYSTEM_STATE: i32 = 1;
+    switched_within(|kind| unsafe {
+        CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, kind)
+    })
+}
+
+/// [`user_switched_recently`] over a reader of seconds since the last event
+/// of each kind, so the rule is testable without the HID system.
+fn switched_within(since: impl Fn(u32) -> f64) -> bool {
     const LEFT_MOUSE_DOWN: u32 = 1;
     const RIGHT_MOUSE_DOWN: u32 = 3;
     const FLAGS_CHANGED: u32 = 12;
     [LEFT_MOUSE_DOWN, RIGHT_MOUSE_DOWN, FLAGS_CHANGED]
         .into_iter()
         .any(|kind| {
-            let since = unsafe { CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, kind) };
-            since.is_finite() && since < USER_SWITCH_WINDOW_S
+            let s = since(kind);
+            s.is_finite() && s < USER_SWITCH_WINDOW_S
         })
 }
 
@@ -982,5 +996,24 @@ mod tests {
         for call in ["steal_key_focus", "calibrate", "release_target_theft"] {
             assert!(!protect.contains(call), "protect() must not call {call}");
         }
+    }
+}
+
+#[cfg(test)]
+mod user_switch_tests {
+    use super::switched_within;
+
+    #[test]
+    fn a_recent_click_or_modifier_counts_as_the_users_switch() {
+        assert!(switched_within(|kind| if kind == 1 { 0.2 } else { 50.0 }));
+        assert!(switched_within(|kind| if kind == 12 { 0.9 } else { 50.0 }));
+    }
+
+    #[test]
+    fn old_or_unknown_input_does_not() {
+        assert!(!switched_within(|_| 1.0));
+        assert!(!switched_within(|_| 30.0));
+        assert!(!switched_within(|_| f64::INFINITY));
+        assert!(!switched_within(|_| f64::NAN));
     }
 }

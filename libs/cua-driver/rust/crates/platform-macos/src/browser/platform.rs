@@ -389,6 +389,11 @@ fn restore_front_app_if_browser_front(previous_pid: i64, browser_pid: i64) -> bo
     if previous == browser || crate::apps::frontmost_pid() != Some(browser) {
         return false;
     }
+    // The browser may be in front because the user switched to it during the
+    // action. Leave their choice alone.
+    if crate::key_focus_guard::user_switched_recently() {
+        return false;
+    }
     crate::apps::activate_pid(previous)
 }
 

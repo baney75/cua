@@ -516,6 +516,12 @@ fn handle_activation(dispatcher: &Arc<Dispatcher>, note: &objc2_foundation::NSNo
     };
 
     let restore_pids = dispatcher.snapshot_matches(activated_pid);
+    // The user may have made this activation themselves, with a click or
+    // Cmd-Tab while an action was in flight. Putting the prior app back would
+    // undo their switch, so leave it.
+    if restore_pids.is_empty() || crate::key_focus_guard::user_switched_recently() {
+        return;
+    }
     for pid in restore_pids {
         restore_focus(pid);
     }
