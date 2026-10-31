@@ -10,6 +10,7 @@
 
 pub mod ax_actions;
 pub mod electron_drag;
+pub mod hid_post;
 pub mod hover;
 pub mod interactive;
 pub mod keyboard;

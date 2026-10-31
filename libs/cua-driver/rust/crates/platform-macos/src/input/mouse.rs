@@ -72,7 +72,7 @@ fn dispatch_mouse_event(route: PostRoute, pid: i32, event: &CGEvent) {
             crate::input::skylight::post_to_pid(pid as libc::pid_t, event_ptr, false);
         }
         PostRoute::PublicPid => event.post_to_pid(pid as libc::pid_t),
-        PostRoute::Hid => event.post(core_graphics::event::CGEventTapLocation::HID),
+        PostRoute::Hid => crate::input::hid_post::post_hid(&event),
         PostRoute::SkyLightAndPublic => {
             crate::input::skylight::post_to_pid(pid as libc::pid_t, event_ptr, false);
             event.post_to_pid(pid as libc::pid_t);
@@ -174,7 +174,6 @@ fn click_at_xy_desktop_inner(
     preserve_cursor: bool,
 ) -> anyhow::Result<()> {
     use core_graphics::display::CGDisplay;
-    use core_graphics::event::CGEventTapLocation;
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let prior = if preserve_cursor {
@@ -227,7 +226,7 @@ fn click_at_xy_desktop_inner(
             )
             .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event(move) failed"))?;
             moved.set_flags(flags);
-            moved.post(CGEventTapLocation::HID);
+            crate::input::hid_post::post_hid(&moved);
             std::thread::sleep(std::time::Duration::from_millis(12));
         }
 
@@ -239,7 +238,7 @@ fn click_at_xy_desktop_inner(
                 core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
                 (pair_index + 1) as i64,
             );
-            down.post(CGEventTapLocation::HID);
+            crate::input::hid_post::post_hid(&down);
             std::thread::sleep(std::time::Duration::from_millis(28));
             let up = CGEvent::new_mouse_event(source.clone(), up_ty, point, btn)
                 .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event(up) failed"))?;
@@ -248,7 +247,7 @@ fn click_at_xy_desktop_inner(
                 core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
                 (pair_index + 1) as i64,
             );
-            up.post(CGEventTapLocation::HID);
+            crate::input::hid_post::post_hid(&up);
             if count > 1 {
                 std::thread::sleep(std::time::Duration::from_millis(80));
             }
@@ -311,7 +310,7 @@ pub fn scroll_wheel_desktop(
     delta_x_per_tick: i32,
     ticks: usize,
 ) -> anyhow::Result<()> {
-    use core_graphics::event::{CGEventTapLocation, ScrollEventUnit};
+    use core_graphics::event::ScrollEventUnit;
 
     move_cursor_desktop(x, y)?;
     std::thread::sleep(std::time::Duration::from_millis(40));
@@ -337,7 +336,7 @@ pub fn scroll_wheel_desktop(
             return Err(anyhow::anyhow!("CGEventCreateScrollWheelEvent2 failed"));
         }
         let event = unsafe { CGEvent::from_ptr(event_ref) };
-        event.post(CGEventTapLocation::HID);
+        crate::input::hid_post::post_hid(&event);
         std::thread::sleep(std::time::Duration::from_millis(30));
     }
     Ok(())
@@ -1201,7 +1200,6 @@ where
     F: FnMut(f64, f64),
 {
     use core_graphics::display::CGDisplay;
-    use core_graphics::event::CGEventTapLocation;
 
     let (cg_button, down_type, dragged_type, up_type) = match button {
         DragButton::Left => (
@@ -1256,7 +1254,7 @@ where
                     anyhow::anyhow!("foreground drag {:?} event creation failed", spec.kind)
                 })?;
             event.set_flags(flags);
-            event.post(CGEventTapLocation::HID);
+            crate::input::hid_post::post_hid(&event);
 
             match spec.kind {
                 ForegroundDragEventKind::Move => {

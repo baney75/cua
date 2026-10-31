@@ -935,6 +935,7 @@ impl BrowserEngine {
         request: PrepareRequest,
     ) -> Result<PrepareOutcome, BrowserRefusal> {
         let browser_pid = request.pid;
+        let action_started = std::time::Instant::now();
         // Where the platform can guard it (macOS: the browser window is on
         // another Space), attach in the background under the guard instead of
         // refusing.
@@ -962,7 +963,9 @@ impl BrowserEngine {
         let mut result = self.attach_existing_profile_checked(request, guarded).await;
         drop(background_guard);
         if let (Some(previous), Some(pid)) = (previous_front, browser_pid) {
-            let restored = self.platform.restore_frontmost_app(previous, pid);
+            let restored = self
+                .platform
+                .restore_frontmost_app(previous, pid, action_started);
             match &mut result {
                 Ok(outcome) => outcome.side_effects.restored_frontmost_app = restored,
                 Err(error) => {

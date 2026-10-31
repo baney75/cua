@@ -304,7 +304,7 @@ fn post_global_key(
     let event = CGEvent::new_keyboard_event(source.clone(), key_code, key_down)
         .map_err(|_| anyhow::anyhow!("CGEvent keyboard event creation failed"))?;
     event.set_flags(flags);
-    event.post(tap);
+    crate::input::hid_post::post_at(&event, tap);
     Ok(())
 }
 
@@ -318,7 +318,7 @@ fn release_global_modifiers(
         active_flags.remove(flag);
         if let Ok(event) = CGEvent::new_keyboard_event(source.clone(), key_code, false) {
             event.set_flags(active_flags);
-            event.post(tap);
+            crate::input::hid_post::post_at(&event, tap);
         }
         key_gap_sleep();
     }
@@ -392,15 +392,13 @@ fn release_pid_modifiers(
 /// queue. This is the desktop-scope counterpart to PID-routed `type_text` and
 /// mirrors computer-server's frontmost pynput typing behavior.
 pub fn type_text_global(text: &str, inter_char_delay_ms: u64) -> anyhow::Result<()> {
-    use core_graphics::event::CGEventTapLocation;
-
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     for ch in text.chars() {
         let (down, up) = char_key_events(&source, ch)?;
-        down.post(CGEventTapLocation::HID);
+        crate::input::hid_post::post_hid(&down);
         key_gap_sleep();
-        up.post(CGEventTapLocation::HID);
+        crate::input::hid_post::post_hid(&up);
         std::thread::sleep(std::time::Duration::from_millis(inter_char_delay_ms).max(key_gap()));
     }
     Ok(())
@@ -415,8 +413,6 @@ pub fn type_text_global(text: &str, inter_char_delay_ms: u64) -> anyhow::Result<
 /// payload carried by keycode 0, so the ordinary text synthesis path cannot be
 /// used for them.
 pub fn type_text_physical_global(text: &str, inter_char_delay_ms: u64) -> anyhow::Result<()> {
-    use core_graphics::event::CGEventTapLocation;
-
     // Validate the complete payload before posting its first event. A string
     // containing an unsupported character must fail without partially typing.
     let event_groups = text
@@ -429,7 +425,7 @@ pub fn type_text_physical_global(text: &str, inter_char_delay_ms: u64) -> anyhow
             .map(|event| create_bare_keyboard_event(event.key_code, event.key_down))
             .collect::<anyhow::Result<Vec<_>>>()?;
         for cg_event in native_events {
-            cg_event.post(CGEventTapLocation::HID);
+            crate::input::hid_post::post_hid(&cg_event);
             key_gap_sleep();
         }
         let extra = std::time::Duration::from_millis(inter_char_delay_ms).saturating_sub(key_gap());
@@ -452,8 +448,6 @@ pub fn type_text_physical_global(text: &str, inter_char_delay_ms: u64) -> anyhow
 /// Remote-input clients such as Screen Sharing re-derive modifiers from the
 /// keycode transitions and ignore the flags, so both consumers are served.
 pub fn press_key_bare_global(key: &str, modifiers: &[&str]) -> anyhow::Result<()> {
-    use core_graphics::event::CGEventTapLocation;
-
     let key_code = key_name_to_code(key)?;
     let mut modifier_keys = Vec::new();
     for modifier in modifiers {
@@ -474,7 +468,7 @@ pub fn press_key_bare_global(key: &str, modifiers: &[&str]) -> anyhow::Result<()
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     for event in events {
-        event.post(CGEventTapLocation::HID);
+        crate::input::hid_post::post_hid(&event);
         key_gap_sleep();
     }
     Ok(())

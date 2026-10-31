@@ -409,8 +409,15 @@ pub trait BrowserPlatform: Send + Sync {
 
     /// After a foreground attachment, bring `previous_pid` back to the front
     /// if `browser_pid` is still in front. Returns true when it did so.
-    /// Implementations must not act when another app took the front since.
-    fn restore_frontmost_app(&self, _previous_pid: i64, _browser_pid: i64) -> bool {
+    /// Implementations must not act when another app took the front since,
+    /// nor when the user chose the browser themselves at any point after
+    /// `action_started`.
+    fn restore_frontmost_app(
+        &self,
+        _previous_pid: i64,
+        _browser_pid: i64,
+        _action_started: std::time::Instant,
+    ) -> bool {
         false
     }
 

@@ -162,7 +162,7 @@ fn revert_self_activation(target: i32, front: i32) -> bool {
     }
     // The user may have switched to the target themselves (a click on its
     // window, or Cmd-Tab). Leave that alone.
-    if user_switched_recently() {
+    if user_caused_now(front, None) {
         return false;
     }
     let started = Instant::now();
@@ -194,42 +194,129 @@ fn revert_self_activation(target: i32, front: i32) -> bool {
     true
 }
 
-/// A hardware mouse-down or modifier change within this long before an
-/// activation means the user may have caused it.
-const USER_SWITCH_WINDOW_S: f64 = 1.0;
+/// How recent user input must be to count as the cause of an activation. The
+/// daemon can see an `NSWorkspace` activation notice up to about a second
+/// after it happened (see [`revert_now`]), so the window is wider than that.
+const USER_SWITCH_WINDOW_S: f64 = 1.5;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
 }
 
-/// Whether the user pressed a mouse button or a modifier key on the real
-/// hardware just now. Events the driver posts to a pid do not count.
-///
-/// Every path that puts the prior frontmost app back checks this first: the
-/// self-activation revert here, the focus-steal leases
-/// ([`crate::focus_steal`]) and the browser tools' restore. Without it, a
-/// user who clicks or Cmd-Tabs to another app while an agent's action is in
-/// flight is sent back to the app they were leaving.
-pub(crate) fn user_switched_recently() -> bool {
-    const HID_SYSTEM_STATE: i32 = 1;
-    switched_within(|kind| unsafe {
-        CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, kind)
-    })
+/// Seconds since the last HID system-state event of each kind that matters
+/// for telling a user's app switch from a background steal. A non-finite
+/// value means the kind has not occurred.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct InputAges {
+    pub left_down: f64,
+    pub right_down: f64,
+    pub key_down: f64,
+    pub flags_changed: f64,
 }
 
-/// [`user_switched_recently`] over a reader of seconds since the last event
-/// of each kind, so the rule is testable without the HID system.
-fn switched_within(since: impl Fn(u32) -> f64) -> bool {
+/// An age counts only when it is a real, non-negative number of seconds.
+fn age_within(age: f64, window_s: f64) -> bool {
+    age.is_finite() && age >= 0.0 && age < window_s
+}
+
+/// Whether the user, not the driver or a background app, caused an activation
+/// that took the front from `leaving`.
+///
+/// - The driver's own HID posts reset the same counters as hardware, so while
+///   it was posting nothing counts.
+/// - Click: a left or right mouse-down within the window whose pointer is over
+///   a window of some app other than `leaving`. A click inside the app being
+///   left is not a switch.
+/// - Keyboard: the last key event within the window was a modifier change, not
+///   a key-down. Cmd-Tab and Ctrl-number switch on the modifier release, while
+///   typing with Shift ends on a key-down.
+///
+/// A launcher switch that ends in Return without a modifier, or a trackpad
+/// swipe, matches neither rule and is treated as not user-caused.
+pub(crate) fn user_caused(
+    ages: InputAges,
+    pointer_owner: Option<i32>,
+    leaving: i32,
+    window_s: f64,
+    driver_posted_recently: bool,
+) -> bool {
+    if driver_posted_recently {
+        return false;
+    }
+    let clicked = age_within(ages.left_down, window_s) || age_within(ages.right_down, window_s);
+    if clicked && pointer_owner.is_some_and(|owner| owner != leaving) {
+        return true;
+    }
+    let key_down = if ages.key_down.is_finite() {
+        ages.key_down
+    } else {
+        f64::INFINITY
+    };
+    age_within(ages.flags_changed, window_s) && ages.flags_changed < key_down
+}
+
+/// Pid of the topmost window in `windows` (front to back) that contains the
+/// point, ignoring `skip_pid` (the driver's own overlay) and the menu-bar
+/// layers, whose owner says nothing about which app the user clicked.
+fn topmost_owner_at(
+    windows: &[crate::windows::WindowInfo],
+    x: f64,
+    y: f64,
+    skip_pid: i32,
+) -> Option<i32> {
+    const MAIN_MENU_LAYER: i32 = 24;
+    const STATUS_LAYER: i32 = 25;
+    windows
+        .iter()
+        .filter(|w| w.pid != skip_pid && w.layer != MAIN_MENU_LAYER && w.layer != STATUS_LAYER)
+        .find(|w| {
+            let b = &w.bounds;
+            x >= b.x && x < b.x + b.width && y >= b.y && y < b.y + b.height
+        })
+        .map(|w| w.pid)
+}
+
+/// Owner pid of the topmost on-screen window under the pointer.
+fn pointer_owner_pid() -> Option<i32> {
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok()?;
+    let at = CGEvent::new(source).ok()?.location();
+    let windows = crate::windows::on_screen_windows_any_layer();
+    topmost_owner_at(&windows, at.x, at.y, std::process::id() as i32)
+}
+
+/// [`user_caused`] over the live HID counters, the pointer and the driver's
+/// own post record.
+///
+/// `since_action_start` widens the window to cover a whole action for paths
+/// that decide at its end (the browser restore), so a switch made early in a
+/// slow action is still seen.
+pub(crate) fn user_caused_now(leaving: i32, since_action_start: Option<Duration>) -> bool {
+    const HID_SYSTEM_STATE: i32 = 1;
     const LEFT_MOUSE_DOWN: u32 = 1;
     const RIGHT_MOUSE_DOWN: u32 = 3;
+    const KEY_DOWN: u32 = 10;
     const FLAGS_CHANGED: u32 = 12;
-    [LEFT_MOUSE_DOWN, RIGHT_MOUSE_DOWN, FLAGS_CHANGED]
-        .into_iter()
-        .any(|kind| {
-            let s = since(kind);
-            s.is_finite() && s < USER_SWITCH_WINDOW_S
-        })
+    let window =
+        Duration::from_secs_f64(USER_SWITCH_WINDOW_S).max(since_action_start.unwrap_or_default());
+    let ages = unsafe {
+        InputAges {
+            left_down: CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, LEFT_MOUSE_DOWN),
+            right_down: CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, RIGHT_MOUSE_DOWN),
+            key_down: CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, KEY_DOWN),
+            flags_changed: CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, FLAGS_CHANGED),
+        }
+    };
+    let driver_posted = crate::input::hid_post::driver_posted_hid_within(window);
+    // Only look up the pointer's window when a click could matter.
+    let window_s = window.as_secs_f64();
+    let clicked = age_within(ages.left_down, window_s) || age_within(ages.right_down, window_s);
+    let owner = (clicked && !driver_posted)
+        .then(pointer_owner_pid)
+        .flatten();
+    user_caused(ages, owner, leaving, window_s, driver_posted)
 }
 
 /// How long the order stays watched after a guarded action ends. A target
@@ -1001,19 +1088,196 @@ mod tests {
 
 #[cfg(test)]
 mod user_switch_tests {
-    use super::switched_within;
+    use super::{topmost_owner_at, user_caused, InputAges};
+    use crate::windows::{WindowBounds, WindowInfo};
 
-    #[test]
-    fn a_recent_click_or_modifier_counts_as_the_users_switch() {
-        assert!(switched_within(|kind| if kind == 1 { 0.2 } else { 50.0 }));
-        assert!(switched_within(|kind| if kind == 12 { 0.9 } else { 50.0 }));
+    const NEVER: f64 = f64::INFINITY;
+    const W: f64 = 1.5;
+    const LEAVING: i32 = 10;
+    const HELIUM: i32 = 20;
+
+    fn ages(left: f64, right: f64, key: f64, flags: f64) -> InputAges {
+        InputAges {
+            left_down: left,
+            right_down: right,
+            key_down: key,
+            flags_changed: flags,
+        }
     }
 
     #[test]
-    fn old_or_unknown_input_does_not() {
-        assert!(!switched_within(|_| 1.0));
-        assert!(!switched_within(|_| 30.0));
-        assert!(!switched_within(|_| f64::INFINITY));
-        assert!(!switched_within(|_| f64::NAN));
+    fn a_click_on_another_apps_window_is_a_switch() {
+        assert!(user_caused(
+            ages(0.2, NEVER, NEVER, NEVER),
+            Some(HELIUM),
+            LEAVING,
+            W,
+            false
+        ));
+        assert!(user_caused(
+            ages(NEVER, 0.2, NEVER, NEVER),
+            Some(HELIUM),
+            LEAVING,
+            W,
+            false
+        ));
+    }
+
+    #[test]
+    fn a_click_inside_the_app_being_left_is_not() {
+        assert!(!user_caused(
+            ages(0.2, NEVER, NEVER, NEVER),
+            Some(LEAVING),
+            LEAVING,
+            W,
+            false
+        ));
+        assert!(!user_caused(
+            ages(0.2, NEVER, NEVER, NEVER),
+            None,
+            LEAVING,
+            W,
+            false
+        ));
+    }
+
+    #[test]
+    fn shift_while_typing_is_not_a_switch() {
+        assert!(!user_caused(
+            ages(NEVER, NEVER, 0.1, 0.3),
+            None,
+            LEAVING,
+            W,
+            false
+        ));
+    }
+
+    #[test]
+    fn a_modifier_release_after_the_last_key_is_a_switch() {
+        // Cmd-Tab: the Tab key-down came first, then Cmd was released.
+        assert!(user_caused(
+            ages(NEVER, NEVER, 0.4, 0.2),
+            None,
+            LEAVING,
+            W,
+            false
+        ));
+        assert!(user_caused(
+            ages(NEVER, NEVER, NEVER, 0.2),
+            None,
+            LEAVING,
+            W,
+            false
+        ));
+    }
+
+    #[test]
+    fn old_or_missing_input_is_not() {
+        assert!(!user_caused(
+            ages(5.0, 5.0, 5.0, 5.0),
+            Some(HELIUM),
+            LEAVING,
+            W,
+            false
+        ));
+        assert!(!user_caused(
+            ages(NEVER, NEVER, NEVER, NEVER),
+            Some(HELIUM),
+            LEAVING,
+            W,
+            false
+        ));
+        let nan = f64::NAN;
+        assert!(!user_caused(
+            ages(nan, nan, nan, nan),
+            Some(HELIUM),
+            LEAVING,
+            W,
+            false
+        ));
+        assert!(!user_caused(
+            ages(-1.0, -1.0, NEVER, -1.0),
+            Some(HELIUM),
+            LEAVING,
+            W,
+            false
+        ));
+    }
+
+    #[test]
+    fn the_drivers_own_posts_never_count() {
+        assert!(!user_caused(
+            ages(0.1, 0.1, 5.0, 0.1),
+            Some(HELIUM),
+            LEAVING,
+            W,
+            true
+        ));
+    }
+
+    #[test]
+    fn the_window_edge() {
+        assert!(user_caused(
+            ages(1.4, NEVER, NEVER, NEVER),
+            Some(HELIUM),
+            LEAVING,
+            W,
+            false
+        ));
+        assert!(!user_caused(
+            ages(1.6, NEVER, NEVER, NEVER),
+            Some(HELIUM),
+            LEAVING,
+            W,
+            false
+        ));
+        // A browser action that ran 30 s still sees a click made 20 s ago.
+        assert!(user_caused(
+            ages(20.0, NEVER, NEVER, NEVER),
+            Some(HELIUM),
+            LEAVING,
+            30.0,
+            false
+        ));
+    }
+
+    fn win(pid: i32, layer: i32, x: f64, y: f64, w: f64, h: f64) -> WindowInfo {
+        WindowInfo {
+            window_id: 1,
+            pid,
+            app_name: String::new(),
+            title: String::new(),
+            bounds: WindowBounds {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+            layer,
+            z_index: 0,
+            is_on_screen: true,
+            current_space_id: None,
+            on_current_space: None,
+            space_ids: None,
+        }
+    }
+
+    #[test]
+    fn the_topmost_window_under_the_point_owns_the_click() {
+        let windows = [
+            win(99, 25, 0.0, 0.0, 2000.0, 30.0), // status layer: skipped
+            win(5, 0, 900.0, 900.0, 50.0, 50.0), // elsewhere
+            win(HELIUM, 0, 100.0, 100.0, 400.0, 400.0),
+            win(LEAVING, 0, 0.0, 0.0, 1000.0, 1000.0),
+        ];
+        assert_eq!(topmost_owner_at(&windows, 150.0, 150.0, 1), Some(HELIUM));
+        assert_eq!(topmost_owner_at(&windows, 700.0, 700.0, 1), Some(LEAVING));
+        assert_eq!(topmost_owner_at(&windows, 1500.0, 1500.0, 1), None);
+        // The driver's own overlay is skipped.
+        let overlay = [
+            win(1, 0, 0.0, 0.0, 2000.0, 2000.0),
+            win(LEAVING, 0, 0.0, 0.0, 1000.0, 1000.0),
+        ];
+        assert_eq!(topmost_owner_at(&overlay, 10.0, 10.0, 1), Some(LEAVING));
     }
 }

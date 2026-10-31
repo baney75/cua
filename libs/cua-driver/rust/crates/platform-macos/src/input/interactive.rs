@@ -25,10 +25,7 @@ use std::{
 };
 
 use core_graphics::{
-    event::{
-        CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
-        ScrollEventUnit,
-    },
+    event::{CGEvent, CGEventFlags, CGEventType, CGMouseButton, EventField, ScrollEventUnit},
     event_source::{CGEventSource, CGEventSourceStateID},
     geometry::CGPoint,
 };
@@ -470,7 +467,7 @@ impl NativeInputState {
         unsafe { CGEventSetLocation(event.as_ptr().cast(), point.x, point.y) };
 
         if self.is_foreground() {
-            event.post(CGEventTapLocation::HID);
+            crate::input::hid_post::post_hid(&event);
         } else {
             super::mouse::post_mouse_event(
                 self.config.pid,
@@ -509,7 +506,7 @@ impl NativeInputState {
 
     fn post_keyboard(&self, event: &CGEvent) {
         if self.is_foreground() {
-            event.post(CGEventTapLocation::HID);
+            crate::input::hid_post::post_hid(&event);
         } else {
             super::keyboard::post_keyboard_event(self.config.pid, event);
         }
@@ -523,7 +520,7 @@ impl NativeInputState {
         click: bool,
     ) {
         if self.is_foreground() {
-            event.post(CGEventTapLocation::HID);
+            crate::input::hid_post::post_hid(&event);
         } else {
             super::mouse::post_mouse_event(
                 self.config.pid,

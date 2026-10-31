@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use cua_driver_core::browser::platform::{
@@ -380,8 +380,30 @@ fn watch_self_activation(pid: i32, front: i32, stop: &std::sync::atomic::AtomicB
 }
 
 /// Bring `previous_pid` back to the front when `browser_pid` is in front.
-/// Leaves things alone when some other app took the front in the meantime.
-fn restore_front_app_if_browser_front(previous_pid: i64, browser_pid: i64) -> bool {
+/// Leaves things alone when some other app took the front in the meantime,
+/// or when the user switched to the browser themselves at any point since
+/// `action_started`.
+fn restore_front_app_if_browser_front(
+    previous_pid: i64,
+    browser_pid: i64,
+    action_started: Instant,
+) -> bool {
+    restore_front_app_unless(
+        previous_pid,
+        browser_pid,
+        action_started,
+        |previous, since| crate::key_focus_guard::user_caused_now(previous, Some(since)),
+    )
+}
+
+/// [`restore_front_app_if_browser_front`] with the user-switch check
+/// injected, so the decision is testable without the HID system.
+fn restore_front_app_unless(
+    previous_pid: i64,
+    browser_pid: i64,
+    action_started: Instant,
+    user_caused: impl FnOnce(i32, Duration) -> bool,
+) -> bool {
     let (Ok(previous), Ok(browser)) = (i32::try_from(previous_pid), i32::try_from(browser_pid))
     else {
         return false;
@@ -390,8 +412,8 @@ fn restore_front_app_if_browser_front(previous_pid: i64, browser_pid: i64) -> bo
         return false;
     }
     // The browser may be in front because the user switched to it during the
-    // action. Leave their choice alone.
-    if crate::key_focus_guard::user_switched_recently() {
+    // action, which can be long past by now. Leave their choice alone.
+    if user_caused(previous, action_started.elapsed()) {
         return false;
     }
     crate::apps::activate_pid(previous)
@@ -926,8 +948,13 @@ impl BrowserPlatform for MacOsBrowserPlatform {
         crate::apps::frontmost_pid().map(i64::from)
     }
 
-    fn restore_frontmost_app(&self, previous_pid: i64, browser_pid: i64) -> bool {
-        restore_front_app_if_browser_front(previous_pid, browser_pid)
+    fn restore_frontmost_app(
+        &self,
+        previous_pid: i64,
+        browser_pid: i64,
+        action_started: Instant,
+    ) -> bool {
+        restore_front_app_if_browser_front(previous_pid, browser_pid, action_started)
     }
 
     async fn visualize_browser_action(&self, action: BrowserVisualAction) {
@@ -1416,6 +1443,7 @@ impl BrowserPlatform for MacOsBrowserPlatform {
         })?;
         // Turning remote debugging back off reopens Chrome's setup page,
         // which brings Chrome to the front; hand the front back afterwards.
+        let action_started = Instant::now();
         let previous_front = crate::apps::frontmost_pid().filter(|front| *front != pid);
         // Chrome on another Space: the same guarded background routes as the
         // attach, so the cleanup does not bring Chrome forward either.
@@ -1432,7 +1460,7 @@ impl BrowserPlatform for MacOsBrowserPlatform {
             || std::thread::sleep(Duration::from_millis(100)),
         );
         if let Some(previous) = previous_front {
-            restore_front_app_if_browser_front(i64::from(previous), request.pid);
+            restore_front_app_if_browser_front(i64::from(previous), request.pid, action_started);
         }
         result
     }
@@ -1882,9 +1910,24 @@ mod tests {
 
     #[test]
     fn front_restore_never_targets_the_browser_or_an_invalid_pid() {
-        assert!(!restore_front_app_if_browser_front(42, 42));
-        assert!(!restore_front_app_if_browser_front(i64::MAX, 42));
-        assert!(!restore_front_app_if_browser_front(42, i64::MIN));
+        let started = Instant::now();
+        assert!(!restore_front_app_if_browser_front(42, 42, started));
+        assert!(!restore_front_app_if_browser_front(i64::MAX, 42, started));
+        assert!(!restore_front_app_if_browser_front(42, i64::MIN, started));
+    }
+
+    #[test]
+    fn front_restore_waits_on_the_user_switch_check() {
+        // The browser is not in front in a test run, so the restore is
+        // declined before the check; the check only ever runs after the
+        // browser-front test, and gets the previous pid and the action age.
+        let asked = std::cell::Cell::new(false);
+        let started = Instant::now() - Duration::from_secs(30);
+        assert!(!restore_front_app_unless(42, 42, started, |_, _| {
+            asked.set(true);
+            false
+        }));
+        assert!(!asked.get(), "same app: nothing to decide");
     }
 
     #[test]

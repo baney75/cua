@@ -105,6 +105,22 @@ struct Entry {
     origin: &'static str,
 }
 
+impl Entry {
+    /// Whether an activation of `activated_pid` is this entry's to restore.
+    fn matches(&self, activated_pid: i32) -> bool {
+        if self.allowed_pid == Some(activated_pid) {
+            return false;
+        }
+        match self.target_pid {
+            Some(p) => p == activated_pid,
+            // Wildcard: match any activation except the restore_to pid
+            // (don't fight ourselves when we re-activate the prior
+            // frontmost).
+            None => activated_pid != self.restore_to,
+        }
+    }
+}
+
 /// Singleton focus-steal preventer.
 ///
 /// Constructed lazily on first `shared()` call. Owns the dispatcher state
@@ -335,20 +351,25 @@ impl Dispatcher {
         guard.retain(|_, e| e.deadline > now);
         guard
             .values()
-            .filter(|e| {
-                if e.allowed_pid == Some(activated_pid) {
-                    return false;
-                }
-                match e.target_pid {
-                    Some(p) => p == activated_pid,
-                    // Wildcard: match any activation except the restore_to
-                    // pid (don't fight ourselves when we re-activate the
-                    // prior frontmost).
-                    None => activated_pid != e.restore_to,
-                }
-            })
+            .filter(|e| e.matches(activated_pid))
             .map(|e| e.restore_to)
             .collect()
+    }
+
+    /// The user chose `activated_pid`: every entry that matches it and was
+    /// set to restore `from` now restores `activated_pid` instead, so a later
+    /// activation in the same lease does not send the user back to the app
+    /// they left. Returns how many entries changed.
+    fn rebase_matches(&self, activated_pid: i32, from: i32) -> usize {
+        let mut guard = self.entries.lock().unwrap();
+        let mut changed = 0;
+        for e in guard.values_mut() {
+            if e.restore_to == from && e.matches(activated_pid) {
+                e.restore_to = activated_pid;
+                changed += 1;
+            }
+        }
+        changed
     }
 
     /// Number of entries (for tests).
@@ -515,15 +536,45 @@ fn handle_activation(dispatcher: &Arc<Dispatcher>, note: &objc2_foundation::NSNo
         pid as i32
     };
 
-    let restore_pids = dispatcher.snapshot_matches(activated_pid);
-    // The user may have made this activation themselves, with a click or
-    // Cmd-Tab while an action was in flight. Putting the prior app back would
-    // undo their switch, so leave it.
-    if restore_pids.is_empty() || crate::key_focus_guard::user_switched_recently() {
-        return;
-    }
+    resolve_activation(
+        dispatcher,
+        activated_pid,
+        |leaving| crate::key_focus_guard::user_caused_now(leaving, None),
+        restore_focus,
+    );
+}
+
+/// Decide what an activation of `activated_pid` does to the leases.
+///
+/// Each distinct restore pid among the matching entries is either put back
+/// (`restore`) or, when `user_caused(restore_pid)` says the user made the
+/// switch, left alone and adopted: those entries now restore `activated_pid`,
+/// so a later steal in the same lease returns to the app the user chose, not
+/// the one they left.
+fn resolve_activation(
+    dispatcher: &Dispatcher,
+    activated_pid: i32,
+    user_caused: impl Fn(i32) -> bool,
+    mut restore: impl FnMut(i32),
+) {
+    let mut restore_pids = dispatcher.snapshot_matches(activated_pid);
+    restore_pids.sort_unstable();
+    restore_pids.dedup();
     for pid in restore_pids {
-        restore_focus(pid);
+        // An entry already restoring this pid (the user's earlier choice):
+        // activating it again would only echo.
+        if pid == activated_pid {
+            continue;
+        }
+        if user_caused(pid) {
+            let rebased = dispatcher.rebase_matches(activated_pid, pid);
+            tracing::debug!(
+                rebased,
+                "user switched; lease now restores to {activated_pid}"
+            );
+        } else {
+            restore(pid);
+        }
     }
 }
 
@@ -716,5 +767,72 @@ mod tests {
         // Set equality — order is HashMap-dependent.
         assert!(matches.contains(&1));
         assert!(matches.contains(&2));
+    }
+
+    /// A user switch must not be undone, and must not leave the lease
+    /// pointing at the app they left.
+    #[test]
+    fn user_switch_rebases_the_lease_instead_of_restoring() {
+        let d = Arc::new(Dispatcher::new());
+        let _h = d.add(None, 7, "test.user");
+        let mut restored = Vec::new();
+        // The user goes from app 7 to Helium (20).
+        resolve_activation(&d, 20, |_| true, |p| restored.push(p));
+        assert!(restored.is_empty(), "the user's own switch is left alone");
+        // Later the agent's target (42) steals focus: back to Helium, not 7.
+        resolve_activation(&d, 42, |_| false, |p| restored.push(p));
+        assert_eq!(restored, vec![20]);
+        // Helium activating again is not a steal.
+        assert!(d.snapshot_matches(20).is_empty());
+    }
+
+    #[test]
+    fn without_a_user_switch_the_lease_restores_the_prior_app() {
+        let d = Arc::new(Dispatcher::new());
+        let _h = d.add(None, 7, "test.steal");
+        let mut restored = Vec::new();
+        resolve_activation(&d, 42, |_| false, |p| restored.push(p));
+        assert_eq!(restored, vec![7]);
+        // The lease is unchanged.
+        assert_eq!(d.snapshot_matches(42), vec![7]);
+    }
+
+    #[test]
+    fn no_matching_entry_asks_nothing() {
+        let d = Arc::new(Dispatcher::new());
+        let _h = d.add(Some(42), 7, "test.none");
+        resolve_activation(
+            &d,
+            99,
+            |_| panic!("no entry matches, so nothing to decide"),
+            |_| panic!("no entry matches, so nothing to restore"),
+        );
+    }
+
+    /// Only the entries whose prior app the user left are adopted.
+    #[test]
+    fn rebase_touches_only_the_users_group() {
+        let d = Arc::new(Dispatcher::new());
+        let _a = d.add(None, 7, "test.a");
+        let _b = d.add(None, 8, "test.b");
+        let mut restored = Vec::new();
+        resolve_activation(&d, 20, |leaving| leaving == 7, |p| restored.push(p));
+        assert_eq!(restored, vec![8]);
+        let mut left = d.snapshot_matches(42);
+        left.sort_unstable();
+        assert_eq!(left, vec![8, 20]);
+    }
+
+    /// A targeted lease: the user chose the target itself.
+    #[test]
+    fn user_choosing_the_target_adopts_it_without_echo() {
+        let d = Arc::new(Dispatcher::new());
+        let _h = d.add(Some(42), 7, "test.target");
+        let mut restored = Vec::new();
+        resolve_activation(&d, 42, |_| true, |p| restored.push(p));
+        assert!(restored.is_empty());
+        // The target activating again restores to itself, which is skipped.
+        resolve_activation(&d, 42, |_| false, |p| restored.push(p));
+        assert!(restored.is_empty());
     }
 }

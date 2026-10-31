@@ -824,7 +824,12 @@ impl BrowserPlatform for FixturePlatform {
         Some(Box::new(()))
     }
 
-    fn restore_frontmost_app(&self, previous_pid: i64, browser_pid: i64) -> bool {
+    fn restore_frontmost_app(
+        &self,
+        previous_pid: i64,
+        browser_pid: i64,
+        _action_started: std::time::Instant,
+    ) -> bool {
         self.focus
             .restores
             .lock()

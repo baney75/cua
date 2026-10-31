@@ -31,7 +31,7 @@
 use std::ffi::c_void;
 
 use core_foundation::base::{CFRelease, CFTypeRef};
-use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+use core_graphics::event::{CGEvent, CGEventType, CGMouseButton};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 use cua_driver_core::pointer_shape::{
@@ -268,7 +268,7 @@ impl PointerShapeBackend for MacPointerShapes {
         ) else {
             return false;
         };
-        event.post(CGEventTapLocation::HID);
+        crate::input::hid_post::post_hid(&event);
         unsafe { CGAssociateMouseAndMouseCursorPosition(true) };
         true
     }
